@@ -1,0 +1,692 @@
+---
+title: "Project 5 Digits"
+author: "Po Yi Liu"
+date: "11/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Library
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(vip)
+library(parallel)
+library(doParallel)
+library(embed)
+library(textrecipes)
+library(xgboost)
+```
+
+## import data and target
+```{r, message=FALSE, warning=FALSE}
+digital_kaggle <- read_csv("D:/fallclass/Intro to Machine Learning/project5/digit_holdout.csv") %>%
+  clean_names() 
+digital_train <- read_csv("D:/fallclass/Intro to Machine Learning/project5/digit_train.csv") %>%
+  clean_names()%>%
+  mutate(label = factor(label))
+head(digital_train)
+```
+
+## Train Test Split 
+```{r, message=FALSE, warning=FALSE}
+train_test_spit<- initial_split(digital_train, prop = 0.7)
+
+train <- training(train_test_spit)
+test  <- testing(train_test_spit)
+
+
+# -- grey scale pixels are 0 - 255 
+train_scaled <- train %>%
+  mutate_if(is.numeric, funs(./255)) 
+
+test_scaled <- test %>%
+  mutate_if(is.numeric, funs(./255)) 
+
+sprintf("Train PCT : %d", nrow(train))
+sprintf("Test  PCT : %d", nrow(test))
+train_cv_folds <- vfold_cv(train, v=5)
+```
+#define recipe for mlp
+```{r, message=FALSE, warning=FALSE}
+digital_recipe <- recipe(label ~ ., train_scaled)%>%
+  step_rm(id)
+
+```
+
+#set mlp model
+```{r, message=FALSE, warning=FALSE}
+digital_mlp <- mlp(hidden_units = tune(), 
+                   penalty = tune(), 
+                   epochs = tune()) %>%
+  set_engine("nnet", MaxNWts=10245) %>%
+  set_mode("classification") 
+
+digital_wf <- workflow() %>%
+  add_recipe(digital_recipe) %>%
+  add_model(digital_mlp)
+
+
+```
+
+#tunning mlp
+```{r, message=FALSE, warning=FALSE}
+# -- setup your tuning grid -- random force 
+tune_grid_mlp <- grid_random(hidden_units(c(0,30)),
+                    penalty(c(0.0, 1)),
+                    epochs(c(10, 100)),
+                    size = 15)
+print(tune_grid_mlp)
+
+# -- setup parallel process 
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+# -- train!! K times for each parameter -- 
+mlp_tuning_results <- digital_wf %>% 
+  tune_grid(
+    resamples = train_cv_folds,
+    grid = tune_grid_mlp,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+mlp_tuning_results
+
+```
+#Review Tuning Results 
+````{r, message=FALSE, warning=FALSE}
+## -- results of tuning -- 
+mlp_tuning_results %>% 
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+ 
+#selecting "best" parameters
+```{r, message=FALSE, warning=FALSE}
+mlp_tuning_results %>%
+  show_best("accuracy") %>%
+  print()
+
+mlp_best <- mlp_tuning_results %>%
+  select_best("accuracy") 
+
+print(mlp_best)
+```
+
+#refitting workflow with "best" parameters
+```{r, message=FALSE, warning=FALSE}
+mlp_final_wf <- digital_wf %>% 
+  finalize_workflow(mlp_best)
+
+print(mlp_final_wf)
+
+mlp_final_fit  <- mlp_final_wf %>%
+  fit(data = train_scaled) 
+```
+
+#evaluate mlp performance
+```{r, message=FALSE, warning=FALSE}
+predict(mlp_final_fit, train_scaled,type="class") %>%
+    bind_cols(., train )-> scored_train
+    
+predict(mlp_final_fit, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test
+
+scored_test$label <- factor(scored_test$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+scored_test$.pred_class <- factor(scored_test$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+scored_train %>%
+  mutate(.part = "train") %>%
+  bind_rows(scored_test %>%
+              mutate(.part = "test")
+  ) %>%
+  group_by(.part) %>%
+    metrics(label, estimate = .pred_class) %>%
+  filter(.metric == "accuracy") %>%
+  spread(.metric, .estimate) %>%
+  select(-.estimator)
+
+ scored_test %>%
+    conf_mat(label, .pred_class) %>%
+    autoplot(type = "heatmap")
+```
+
+#prediction example when label=1
+```{r, message=FALSE, warning=FALSE}
+theme_set(theme_light())
+theme_set(theme_light())
+
+predict(mlp_final_fit, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test
+
+x_gathered <- scored_test %>%
+  filter(label == 1) %>%
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(12) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+
+x_gathered$label <- factor(x_gathered$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered$.pred_class <- factor(x_gathered$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+
+x_gathered %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_tile() +
+  facet_wrap(~label + .pred_class)
+
+```
+#prediction example when label not equal to predict
+```{r, message=FALSE, warning=FALSE}
+
+predict(mlp_final_fit, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test
+
+x_gathered <- scored_test %>%
+  #filter(label == 0) %>%
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(30) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered$label <- factor(x_gathered$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered$.pred_class <- factor(x_gathered$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+
+
+```
+#prediction example when label=0
+```{r}
+predict(mlp_final_fit, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test
+
+x_gathered <- scored_test %>%
+  filter(label == 0) %>% # cycle through examples 
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(50) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered$label <- factor(x_gathered$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered$.pred_class <- factor(x_gathered$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+
+```
+#prediction example when label=0 to 9
+```{r}
+image_check <- function(label_id){
+  predict(mlp_final_fit, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test
+
+x_gathered <- scored_test %>%
+  filter(label == label_id) %>% # cycle through examples 
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(50) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered$label <- factor(x_gathered$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered$.pred_class <- factor(x_gathered$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+  
+}
+
+
+
+for (i in range(0:9)){
+  p <- image_check(i)
+  print(p)
+}
+
+```
+
+#define recipe for rf and xgboost
+```{r, message=FALSE, warning=FALSE}
+digital_recipe01 <- recipe(label ~ ., train)%>%
+  step_rm(id)
+```
+
+```{r, message=FALSE, warning=FALSE}
+bake_train <- bake(digital_recipe01%>%prep(), new_data = train)
+```
+
+
+## random forest
+#Define the Model Document and hyper parameters
+#Create a workflow and Fit the model
+```{r, message=FALSE, warning=FALSE}
+fraud_rf_spec <- rand_forest(
+    trees  = tune(),
+    min_n = tune(),
+   ) %>% 
+      set_engine("ranger", importance = "impurity") %>% 
+      set_mode("classification")
+
+fraud_rf_wf <- workflow() %>%
+  add_recipe(digital_recipe01) %>%
+  add_model(fraud_rf_spec) 
+ 
+
+```
+
+
+#tunning random forest
+```{r, message=FALSE, warning=FALSE}
+# -- setup your tuning grid -- random force 
+tune_grid_rf <- grid_random(trees(c(100,500)),
+                         min_n(),
+                          size = 15)
+print(tune_grid_rf)
+
+# -- setup parallel process 
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+# -- train!! K times for each parameter -- 
+rf_tuning_results <- fraud_rf_wf %>% 
+  tune_grid(
+    resamples = train_cv_folds,
+    grid = tune_grid_rf,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+rf_tuning_results
+
+```
+
+#Review Tuning Results 
+````{r, message=FALSE, warning=FALSE}
+## -- results of tuning -- 
+rf_tuning_results %>% 
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+
+#Visualize impact 
+```{r, message=FALSE, warning=FALSE}
+## - visualize 
+rf_tuning_results %>%
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(trees, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+rf_tuning_results %>%
+  collect_metrics()  %>%
+  mutate_if(is.numeric, round,3) %>%
+  ggplot(aes(min_n, mean, )) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+
+```
+
+
+#selecting "best" parameters
+```{r, message=FALSE, warning=FALSE}
+rf_tuning_results %>%
+  show_best("accuracy") %>%
+  print()
+
+rf_best <- rf_tuning_results %>%
+  select_best("accuracy") 
+
+print(rf_best)
+```
+
+
+#refitting workflow with "best" parameters
+```{r, message=FALSE, warning=FALSE}
+rf_final_wf <- fraud_rf_wf %>% 
+  finalize_workflow(rf_best)
+
+print(rf_final_wf)
+
+rf_final_fit  <- rf_final_wf %>%
+  fit(data = train) 
+```
+
+#model performance
+```{r, message=FALSE, warning=FALSE}
+# -- score training  
+predict(rf_final_fit, train) %>%
+  bind_cols(.,train)-> scored_train_rf 
+
+# -- score testing 
+predict(rf_final_fit, test) %>%
+     bind_cols(., test) -> scored_test_rf   
+
+# -- Metrics: Train and Test 
+scored_train_rf %>% 
+  metrics(label, .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_rf %>% 
+               metrics(label, .pred_class) %>%
+               mutate(part="testing") ) %>%
+  pivot_wider(names_from = .metric, values_from=.estimate)
+  
+```
+
+
+#prediction example when label not equal to predict
+```{r, message=FALSE, warning=FALSE}
+x_gathered_rf <- scored_test_rf %>%
+  #filter(label == 0) %>%
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(30) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered_rf$label <- factor(x_gathered_rf$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_rf$.pred_class <- factor(x_gathered_rf$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_rf %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+
+
+```
+
+#prediction example when label= 0 to 9
+```{r, message=FALSE, warning=FALSE}
+image_check <- function(label_id){
+  predict(digital_wf, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test_rf
+
+x_gathered_rf01 <- scored_test_rf %>%
+  filter(label == label_id) %>% # cycle through examples 
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(50) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered_rf01$label <- factor(x_gathered_rf01$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_rf01$.pred_class <- factor(x_gathered_rf01$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_rf01 %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+  
+}
+
+
+
+for (i in range(0:9)){
+  p <- image_check(i)
+  print(p)
+}
+
+```
+
+## xgboost
+```{r, message=FALSE, warning=FALSE}
+xgb_model <- boost_tree(
+  trees = tune(), 
+  min_n = tune(),            ## minimum number of observations 
+  learn_rate = tune()        ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_model
+
+# -- setup workflow 
+xgb_workflow <- workflow() %>%
+  add_recipe(digital_recipe01) %>%
+  add_model(xgb_model) 
+
+```
+
+#tunning xgboost
+```{r, message=FALSE, warning=FALSE}
+tune_grid <- grid_random(trees(c(100,200)), 
+                          min_n(),
+                          learn_rate(),
+                          size = 5)
+print(tune_grid)
+```
+
+#tunning result
+```{r, message=FALSE, warning=FALSE}
+all_cores <- detectCores(logical = TRUE)
+sprintf("# of Logical Cores: %d", all_cores)
+cl <- makeCluster(all_cores)
+registerDoParallel(cl)
+
+xgb_tuning_results <- xgb_workflow %>%
+  tune_grid(
+  resamples = train_cv_folds,
+  grid = tune_grid,
+  control = control_resamples(save_pred = TRUE))
+ 
+xgb_tuning_results
+```
+
+
+#Review Tuning Results 
+````{r, message=FALSE, warning=FALSE}
+## -- results of tuning -- 
+xgb_tuning_results %>% 
+  collect_metrics() %>%
+  mutate_if(is.numeric, round,3) %>% 
+  pivot_wider(names_from = .metric, values_from=c(mean, std_err))
+```
+
+
+#selecting "best" parameters
+```{r, message=FALSE, warning=FALSE}
+xgb_tuning_results %>%
+  show_best("accuracy") %>%
+  print()
+
+xgb_best <- xgb_tuning_results %>%
+  select_best("accuracy") 
+
+print(xgb_best)
+```
+
+#refitting workflow with "best" parameters
+```{r, message=FALSE, warning=FALSE}
+xgb_final_wf <- xgb_workflow %>% 
+  finalize_workflow(xgb_best)
+
+print(xgb_final_wf)
+
+xgb_final_fit  <- xgb_final_wf %>%
+  fit(data = train) 
+```
+
+#model performance
+```{r, message=FALSE, warning=FALSE}
+# -- score training  
+predict(xgb_final_fit, train) %>%
+  bind_cols(.,train)-> scored_train_xgb 
+
+# -- score testing 
+predict(xgb_final_fit, test) %>%
+     bind_cols(., test) -> scored_test_xgb   
+
+# -- Metrics: Train and Test 
+scored_train_xgb %>% 
+  metrics(label, .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_xgb %>% 
+               metrics(label, .pred_class) %>%
+               mutate(part="testing") ) %>%
+  pivot_wider(names_from = .metric, values_from=.estimate)
+  
+```
+
+#prediction example when label not equal to predict
+```{r, message=FALSE, warning=FALSE}
+x_gathered_xgb <- scored_test_xgb %>%
+  #filter(label == 0) %>%
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(30) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered_xgb$label <- factor(x_gathered_xgb$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_xgb$.pred_class <- factor(x_gathered_xgb$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_xgb %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+
+
+```
+
+
+#prediction example when label= 0 to 9
+```{r, message=FALSE, warning=FALSE}
+image_check <- function(label_id){
+  predict(digital_wf, test_scaled,type="class") %>%
+    bind_cols(., test )-> scored_test_xgb
+
+x_gathered_xgb01 <- scored_test_xgb %>%
+  filter(label == label_id) %>% # cycle through examples 
+  filter(label != .pred_class) %>%
+  select(starts_with("x"), label,.pred_class ) %>%
+  head(50) %>%
+  mutate(instance = row_number()) %>%
+  gather(x, value, -label, -instance, -.pred_class) %>%
+  tidyr::extract(x, "x", "(\\d+)", convert = TRUE) %>%
+  mutate(pixel = x - 2,
+         x = pixel %% 28,
+         y = 28 - pixel %/% 28)
+
+x_gathered_xgb01$label <- factor(x_gathered_xgb01$label,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_xgb01$.pred_class <- factor(x_gathered_xgb01$.pred_class,
+levels = c(0,1,2,3,4,5,6,7,8,9))
+#labels = c("T-shirt/top", "Trouser", "Pullover", "Dress", "Coat", "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"))
+
+x_gathered_xgb01 %>%
+  ggplot(aes(x, y, fill = value)) +
+  geom_raster() +
+   scale_fill_gradient(low = "white", high = "black", na.value = NA) + 
+  facet_wrap(~ label + .pred_class) 
+  
+}
+
+
+
+for (i in range(0:9)){
+  p <- image_check(i)
+  print(p)
+}
+
+```
+
