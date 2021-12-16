@@ -12,12 +12,11 @@ Model Performance Summary & Interpretation:
 model_name	        (accuracy)
 
 
-mlp_training 	 >     (0.8967585)
-mlp_testing	   >    (0.8772423)
-rf_training	   >    (0.9998566)
-rf_testing	   >    (0.9659973)
-xgboost_training	>  (0.9739530)
-xgboost_testing	  >  (0.9472557)
+mlp_training(0.8967585) | mlp_testing (0.8772423)
+
+rf_training(0.9998566) | rf_testing(0.9659973)
+
+xgboost_training(0.9739530) | xgboost_testing(0.9472557)
 
 * Comparing three models in the analysis, the random forest shows the highest accuracy in the test data, roughly 96.5%, which is higher than the mlp's 87% and xgboost’s 94%.
 
