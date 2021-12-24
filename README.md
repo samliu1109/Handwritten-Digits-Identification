@@ -5,7 +5,7 @@ Executive Summary
 Problem:
 The MNIST ("Modified National Institute of Standards and Technology") Handwritten Digits dataset is considered as the “Hello World” of Computer Vision. Since its release in 1999, this classic dataset of handwritten images has served as the basis for benchmarking classification algorithms. As new machine learning techniques emerge, MNIST remains a reliable resource for researchers and learners alike.
 
-In this project, I built three models to identify digits from a dataset of tens of thousands of handwritten images. I will discover the handwritten digits from 0 – 9, which is a multi-classification problem. 
+In this project, I built three models to identify digits from a dataset of tens of thousands of handwritten images. I will discover the handwritten digits from 0 – 9. 
 
 Model Performance Summary & Interpretation:
 
